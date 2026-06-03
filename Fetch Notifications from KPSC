@@ -1,0 +1,140 @@
+const URL = 'https://www.keralapsc.gov.in/notifications';
+const EMAIL_TO = 'vivek5@gmail.com, bal@gmail.com';
+
+const FETCH_OPTIONS = {
+  muteHttpExceptions: true,
+  headers: {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+    'Accept-Language': 'en-US,en;q=0.5'
+  }
+};
+
+function checkNotifications() {
+  const response = UrlFetchApp.fetch(URL, FETCH_OPTIONS);
+  const html = response.getContentText();
+
+  if (response.getResponseCode() !== 200 || html.length < 1000) {
+    console.log('Fetch failed. Code: ' + response.getResponseCode() + ', length: ' + html.length);
+    return;
+  }
+
+  const regex = /<a href="(\/[^"]*?(?:gazette|notification)[^"]*?)"[^>]*>([^<]+)<\/a>/gi;
+  const found = {};
+  let m;
+  while ((m = regex.exec(html)) !== null) {
+    const url = 'https://www.keralapsc.gov.in' + m[1];
+    const title = m[2].trim();
+    if (title.length > 10) found[url] = title;
+  }
+
+  console.log('Found ' + Object.keys(found).length + ' notifications on the page');
+
+  const props = PropertiesService.getScriptProperties();
+  const seen = JSON.parse(props.getProperty('seen') || '{}');
+
+  const newItems = [];
+  for (const url in found) {
+    if (!seen[url]) newItems.push({url, title: found[url]});
+  }
+
+  if (newItems.length > 0) {
+    // For each new gazette, fetch its detail page to get the individual posts
+    const sections = newItems.map(item => {
+      const posts = getPostsFromGazette(item.url);
+      let section = `<h3 style="margin-bottom:4px;"><a href="${item.url}">${item.title}</a></h3>`;
+      if (posts.length > 0) {
+        section += '<ul style="margin-top:4px;">';
+        section += posts.map(p => `<li><a href="${p.url}">${p.title}</a></li>`).join('');
+        section += '</ul>';
+      } else {
+        section += '<p style="margin-top:4px;color:#666;">(No individual post links found — open the gazette link above)</p>';
+      }
+      return section;
+    });
+
+    const htmlBody = `
+      <div style="font-family:Arial,sans-serif;font-size:14px;line-height:1.5;">
+        <p><b>Puthiya Notification vannittundeeeee — poi apply cheyy 🎯</b></p>
+        <p>${newItems.length} new gazette notification(s) detected on Kerala PSC:</p>
+        ${sections.join('')}
+        <hr>
+        <p style="font-size:12px;color:#888;">Source: <a href="${URL}">${URL}</a></p>
+      </div>
+    `;
+
+    const plainBody = newItems.map(i => `• ${i.title}\n  ${i.url}`).join('\n\n');
+
+    MailApp.sendEmail({
+      to: EMAIL_TO,
+      subject: `Kerala PSC: ${newItems.length} new notification(s)`,
+      body: plainBody,
+      htmlBody: htmlBody
+    });
+    console.log('Emailed ' + newItems.length + ' new notification(s)');
+  } else {
+    console.log('No new notifications');
+  }
+
+  props.setProperty('seen', JSON.stringify(found));
+}
+
+function getPostsFromGazette(gazetteUrl) {
+  try {
+    const response = UrlFetchApp.fetch(gazetteUrl, FETCH_OPTIONS);
+    if (response.getResponseCode() !== 200) return [];
+    const html = response.getContentText();
+
+    // Match any links to PDF files in the sites/default/files path (post notifications)
+    const regex = /<a[^>]+href="(https?:\/\/[^"]*\/sites\/default\/files\/[^"]*\.pdf)"[^>]*>([^<]+)<\/a>/gi;
+    const seen = {};
+    const posts = [];
+    let m;
+    while ((m = regex.exec(html)) !== null) {
+      const url = m[1];
+      const title = m[2].trim();
+      if (title.length > 5 && !seen[url]) {
+        seen[url] = true;
+        posts.push({url, title});
+      }
+    }
+    return posts;
+  } catch (e) {
+    console.log('Error fetching ' + gazetteUrl + ': ' + e);
+    return [];
+  }
+}
+
+function installTrigger() {
+  ScriptApp.getProjectTriggers().forEach(t => {
+    if (t.getHandlerFunction() === 'checkNotifications') ScriptApp.deleteTrigger(t);
+  });
+
+  ScriptApp.newTrigger('checkNotifications')
+    .timeBased()
+    .atHour(18)
+    .everyDays(1)
+    .inTimezone('Asia/Kolkata')
+    .create();
+
+  console.log('Daily trigger installed for 6 PM IST');
+}
+
+function testEmail() {
+  const props = PropertiesService.getScriptProperties();
+  const seen = JSON.parse(props.getProperty('seen') || '{}');
+  const keys = Object.keys(seen);
+  if (keys.length > 0) {
+    delete seen[keys[0]];
+    props.setProperty('seen', JSON.stringify(seen));
+    console.log('Removed one entry: ' + keys[0]);
+    console.log('Now run checkNotifications to test email.');
+  } else {
+    console.log('No entries saved yet — run checkNotifications once first.');
+  }
+}
+
+function resetSeen() {
+  PropertiesService.getScriptProperties().deleteProperty('seen');
+  console.log('Cleared stored notifications. Next run will email everything as new.');
+}
